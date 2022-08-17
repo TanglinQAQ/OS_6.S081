@@ -489,39 +489,38 @@ sys_pipe(void)
 uint64
 sys_mmap(void)
 {
-   int len;
-   int prot,flags,fd;
-   struct file *f;
-   if(argint(1, &len) < 0 ||  argint(2, &prot) < 0 || argint(3, &flags) < 0  || argfd(4, &fd,&f) < 0  )
+  uint64 addr;
+  int length, prot, flags, fd, offset;
+  struct file *file;
+  struct proc* p = myproc();
+  //读取参数
+  if (argaddr(0, &addr) || argint(1, &length) || argint(2, &prot) ||
+    argint(3, &flags) || argfd(4, &fd, &file) || argint(5, &offset)) {
     return -1;
-
-   // if file is read-only,but map it as writable.return fail
-   if(!f->writable && (prot & PROT_WRITE) && (flags & MAP_SHARED ) )
-   {
-      return -1;
-   }
-
-   struct proc* p=myproc();
-   for(uint i=0;i<MAXVMA;i++)
-   { 
-      struct VMA *v=&p->vma[i]	;   
-      if(!v->used) //find an unsed vma
-      {
-         // store relative auguments
-	 v->used=1;
-         v->addr=p->sz;//use p->sz to p->sz+len to map the file
-	 len= PGROUNDUP(len);
-	 p->sz+=len;
-	 v->len=len;
-	 v->prot=prot;
-	 v->flags=flags;
-	 v->f= filedup(f);//increase the file's ref cnt
-	 v->start_point=0;//staring point in f to map is 0
-	 return v->addr;
-      }
-   }
-   
-   return -1;
+  }
+  if(!file->writable && (prot & PROT_WRITE) && flags == MAP_SHARED)
+    return -1;
+  length = PGROUNDUP(length);//内存对齐
+  if(p->sz > MAXVA - length)//过大
+    return -1;
+  //遍历VMA数组寻找空闲VMA
+  for (int i = 0; i < VMASIZE; i++) {
+    if (p->vma[i].used == 0) {
+      //若为空闲，对这个VMA初始化
+      p->vma[i].used = 1;
+      p->vma[i].addr = p->sz;
+      p->vma[i].length = length;
+      p->vma[i].prot = prot;
+      p->vma[i].flags = flags;
+      p->vma[i].fd = fd;
+      p->vma[i].file = file;
+      p->vma[i].offset = offset;
+      filedup(file);
+      p->sz += length;
+      return p->vma[i].addr;//返回地址
+    }
+  }
+  return -1;
 }
 
 
@@ -555,53 +554,36 @@ uint64
 sys_munmap(void)
 {
   uint64 addr;
-  int len;   
-  int close=0;
-  if(argaddr(0, &addr) < 0 ||  argint(1, &len) < 0 )
+  int length;
+  struct proc* p = myproc();
+  struct vma* vma = 0;
+  //读参数
+  if (argaddr(0, &addr) || argint(1, &length))
     return -1;
-   struct proc* p=myproc();
-   for(uint i=0;i<MAXVMA;i++)
-   { 
-      struct VMA *v=&p->vma[i];
-      //only unmap at start,end or the whole region
-      if(v->used && addr>=v->addr && addr <=v->addr+v->len)
-      {
-	 uint64 npages=0;  
-         uint off=v->start_point;	 
-         if(addr==v->addr) // unmap at start
-	 {
-	     if(len >= v->len) //unmap whole region
-	     {
-		 len=v->len;      
-	         v->used=0;
-		 close=1;
-	     }
-	     else//unmap from start but not whole region
-	     {
-		v->addr+=len;     
-		v->start_point=len;//update start point at which to map
-	     }
-	 }
-	 len=PGROUNDUP(len);
-         npages=len/PGSIZE; 
-	 v->len-=len;
-	 p->sz-=len;
-
-         if(v->flags & MAP_SHARED) // need to write back pages
-	 {
-	    file_write_new(v->f, addr , len , off );
-	 }	 
-          
-
-         uvmunmap(p->pagetable,PGROUNDDOWN(addr),npages,0);
-         // decrease ref cnt of v->f 
-	 if(close) fileclose(v->f);
-
-	 return 0;
-      }
-         
-   }
-  return -1;
+  addr = PGROUNDDOWN(addr);
+  length = PGROUNDUP(length);
+  for (int i = 0; i < VMASIZE; i++) {
+    if (addr >= p->vma[i].addr || addr < p->vma[i].addr + p->vma[i].length) {
+      vma = &p->vma[i];
+      break;
+    }
+  }
+  if (vma == 0) return 0;
+  if (vma->addr == addr) {
+    vma->addr += length;
+    vma->length -= length;
+    //写回
+    if (vma->flags & MAP_SHARED)
+      filewrite(vma->file, addr, length);
+    //取消映射
+    uvmunmap(p->pagetable, addr, length / PGSIZE, 1);
+    //清除占用的VMA
+    if (vma->length == 0) {
+      fileclose(vma->file);
+      vma->used = 0;
+    }
+  }
+  return 0;
 }
 
 

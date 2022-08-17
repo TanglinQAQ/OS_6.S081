@@ -10,6 +10,9 @@
 #include "fs.h"
 #include "file.h"
 
+//修改
+#include "fcntl.h"
+
 struct spinlock tickslock;
 uint ticks;
 
@@ -42,22 +45,22 @@ usertrap(void)
 {
   int which_dev = 0;
 
-  if((r_sstatus() & SSTATUS_SPP) != 0)
+  if ((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
   // send interrupts and exceptions to kerneltrap(),
   // since we're now in the kernel.
   w_stvec((uint64)kernelvec);
 
-  struct proc *p = myproc();
-  
+  struct proc* p = myproc();
+
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
-  if(r_scause() == 8){
+
+  if (r_scause() == 8) {
     // system call
 
-    if(p->killed)
+    if (p->killed)
       exit(-1);
 
     // sepc points to the ecall instruction,
@@ -69,60 +72,58 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  }
+  else if ((which_dev = devintr()) != 0) {
     // ok
-  } else if(r_scause()==13 || r_scause()==15)//page fault
-  {
-      // check whether lazy allocation is needed	  
-      uint64 va=r_stval();
-       
-      if(va>=p->sz) goto a;
-      if(va<p->trapframe->sp) goto a;
-
-      uint lazy=0;
-      for(uint i=0;i<MAXVMA;i++)
-      {
-	 struct VMA *v=&p->vma[i];     
-         if(v->used && va>=v->addr && va<v->addr+v->len)//find corresponding vma
-	 {
-            // lazy allocation		 
-	    char * mem;
-	    mem=kalloc();
-	    memset(mem,0,PGSIZE);
-	    if(mem==0) goto a;
-            va=PGROUNDDOWN(va);
-	    uint64 off=v->start_point+va-v->addr;// starting point + extra offset
-
-	    // PROT_READ=1 PROT_WRITE=2 PROT_EXEC=4
-	    // PTE_R=2     PTE_W=4      PTE_X=8
-	    // 所以需要将vma[i]->prot 左移一位
-	    if(mappages(p->pagetable,va,PGSIZE,(uint64)mem,(v->prot<<1) |PTE_U  )!=0)
-	    {
-	       kfree(mem);
-	       goto a;
-	    }
-            // read 4096 bytes of relevant file into allocated page
-	    ilock(v->f->ip);
-	    readi(v->f->ip,1,va,off,PGSIZE);
-	    iunlock(v->f->ip);
-	    lazy=1;
-	    break;
-	 } 
+  }
+  else if (r_scause() == 13 || r_scause() == 15) {
+    uint64 va = r_stval();
+    if (va >= p->sz || va > MAXVA || PGROUNDUP(va) == PGROUNDDOWN(p->trapframe->sp)) p->killed = 1;
+    else {
+      struct vma* vma = 0;
+      for (int i = 0; i < VMASIZE; i++) {
+        if (p->vma[i].used == 1 && va >= p->vma[i].addr && va < p->vma[i].addr + p->vma[i].length) {
+          //为所求的则把值赋给vma
+          vma = &p->vma[i];
+          break;
+        }
       }
-      if(!lazy)  goto a;// no lazy allocation is needed
-  } 
+      if (vma) {
+        va = PGROUNDDOWN(va);
+        uint64 offset = va - vma->addr;
+        uint64 mem = (uint64)kalloc();
+        if (mem == 0) {
+          p->killed = 1;
+        }
+        else {
+          memset((void*)mem, 0, PGSIZE);
+          //读入inode
+          ilock(vma->file->ip);
+          readi(vma->file->ip, 0, mem, offset, PGSIZE);
+          iunlock(vma->file->ip);
+          int flag = PTE_U;
+          if (vma->prot & PROT_READ) flag |= PTE_R;
+          if (vma->prot & PROT_WRITE) flag |= PTE_W;
+          if (vma->prot & PROT_EXEC) flag |= PTE_X;
+          if (mappages(p->pagetable, va, PGSIZE, mem, flag) != 0) {
+            kfree((void*)mem);
+            p->killed = 1;
+          }
+        }
+      }
+    }
+  }
   else {
-   a:	  
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
   }
 
-  if(p->killed)
+  if (p->killed)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if (which_dev == 2)
     yield();
 
   usertrapret();

@@ -5,6 +5,8 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+//修改
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -266,29 +268,16 @@ int
 fork(void)
 {
   int i, pid;
-  struct proc *np;
-  struct proc *p = myproc();
+  struct proc* np;
+  struct proc* p = myproc();
 
   // Allocate process.
-  if((np = allocproc()) == 0){
+  if ((np = allocproc()) == 0) {
     return -1;
   }
- 
-  for(int i=0;i<MAXVMA ; i++)
-  {
-     struct VMA *v=&p->vma[i];
-     struct VMA *nv=&np->vma[i];
-      //only unmap at start,end or the whole region
-      if(v->used)
-      {
-         memmove(nv,v,sizeof(struct VMA)); 
-	 filedup(nv->f);
-      }
-  }
-
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0) {
     freeproc(np);
     release(&np->lock);
     return -1;
@@ -304,8 +293,8 @@ fork(void)
   np->trapframe->a0 = 0;
 
   // increment reference counts on open file descriptors.
-  for(i = 0; i < NOFILE; i++)
-    if(p->ofile[i])
+  for (i = 0; i < NOFILE; i++)
+    if (p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
@@ -314,7 +303,13 @@ fork(void)
   pid = np->pid;
 
   np->state = RUNNABLE;
-
+  //修改：复制VMA到子进程
+  for (int i = 0; i < VMASIZE; i++) {
+    if (p->vma[i].used) {
+      memmove(&(np->vma[i]), &(p->vma[i]), sizeof(p->vma[i]));
+      filedup(p->vma[i].file);
+    }
+  }
   release(&np->lock);
 
   return pid;
@@ -352,29 +347,28 @@ reparent(struct proc *p)
 void
 exit(int status)
 {
-  struct proc *p = myproc();
+  struct proc* p = myproc();
 
-  if(p == initproc)
+  if (p == initproc)
     panic("init exiting");
 
   // Close all open files.
-  for(int fd = 0; fd < NOFILE; fd++){
-    if(p->ofile[fd]){
-      struct file *f = p->ofile[fd];
+  for (int fd = 0; fd < NOFILE; fd++) {
+    if (p->ofile[fd]) {
+      struct file* f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
     }
   }
-
-  for(int i=0;i<MAXVMA ; i++)
-  {
-     struct VMA *v=&p->vma[i];
-      //only unmap at start,end or the whole region
-      if(v->used)
-      {
-         uvmunmap(p->pagetable,v->addr,v->len / PGSIZE,0);
-         memset(v,0,sizeof(struct VMA)); 
-      }
+  //修改：清除VMA
+  for (int i = 0; i < VMASIZE; i++) {
+    if (p->vma[i].used) {
+      if (p->vma[i].flags & MAP_SHARED)
+        filewrite(p->vma[i].file, p->vma[i].addr, p->vma[i].length);
+      fileclose(p->vma[i].file);
+      uvmunmap(p->pagetable, p->vma[i].addr, p->vma[i].length / PGSIZE, 1);
+      p->vma[i].used = 0;
+    }
   }
 
   begin_op();
@@ -398,9 +392,9 @@ exit(int status)
   // to a dead or wrong process; proc structs are never re-allocated
   // as anything else.
   acquire(&p->lock);
-  struct proc *original_parent = p->parent;
+  struct proc* original_parent = p->parent;
   release(&p->lock);
-  
+
   // we need the parent's lock in order to wake it up from wait().
   // the parent-then-child rule says we have to lock it first.
   acquire(&original_parent->lock);
